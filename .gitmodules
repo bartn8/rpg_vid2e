@@ -1,3 +1,6 @@
 [submodule "esim_py/pybind11"]
 	path = esim_py/pybind11
 	url = https://github.com/pybind/pybind11.git
+[submodule "frame-interpolation-pytorch"]
+	path = frame-interpolation-pytorch
+	url = https://github.com/dajes/frame-interpolation-pytorch.git
