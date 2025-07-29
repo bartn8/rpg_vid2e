@@ -1,12 +1,12 @@
 import os
 import shutil
+from typing import Optional
 import torch
 import cv2
 import numpy as np
 from tqdm import tqdm
 
 from . import Sequence
-from .const import imgs_dirname
 from .interpolator import InterpolatorWrapper
 from .utils import get_sequence_or_none
 
@@ -14,36 +14,44 @@ from .utils import get_sequence_or_none
 class Upsampler:
     _timestamps_filename = 'timestamps.txt'
 
-    def __init__(self, input_dir: str, output_dir: str):
+    def __init__(self, input_dir: str, output_dir: str, pretrained_model_path: Optional[str] = None, max_bisections: int = 5):
         assert os.path.isdir(input_dir), 'The input directory must exist'
-        #assert not os.path.exists(output_dir), 'The output directory must not exist'
 
         if os.path.exists(output_dir):
             # Remove the existing output directory if it exists (also files)
             shutil.rmtree(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
 
-        self._prepare_output_dir(input_dir, output_dir)
         self.src_dir = input_dir
         self.dest_dir = output_dir
+        self.max_bisections = max_bisections
 
-        path = os.path.join(os.path.dirname(__file__), "../../pretrained_models/film_net_fp32.pt")
+        path = os.path.join(os.path.dirname(__file__), "../../pretrained_models/film_net_fp32.pt") if pretrained_model_path is None else pretrained_model_path
         self.interpolator = InterpolatorWrapper(path, None)
         self.interpolator.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
 
     def upsample(self):
-        sequence_counter = 0
+        
+        seq_list = []
+
         for src_absdirpath, dirnames, filenames in os.walk(self.src_dir):
             sequence = get_sequence_or_none(src_absdirpath)
             if sequence is None:
                 continue
+            seq_list.append(src_absdirpath)
 
-            print(f"Seq size: {len(sequence)}")
+        #sort the sequences by their absolute path
+        seq_list.sort()
 
-            sequence_counter += 1
-            print('Processing sequence number {}'.format(src_absdirpath))
+
+        for src_absdirpath in tqdm(seq_list, desc="Processing sequences"):
+            sequence = get_sequence_or_none(src_absdirpath)
+            if sequence is None:
+                continue
+
             reldirpath = os.path.relpath(src_absdirpath, self.src_dir)
             dest_imgs_dir = os.path.join(self.dest_dir, reldirpath)
-            dest_timestamps_filepath = os.path.join(self.dest_dir, reldirpath, self._timestamps_filename)
+            dest_timestamps_filepath = os.path.join(self.dest_dir, reldirpath, "..", self._timestamps_filename)
             self.upsample_sequence(sequence, dest_imgs_dir, dest_timestamps_filepath)
 
     def upsample_sequence(self, sequence: Sequence, dest_imgs_dir: str, dest_timestamps_filepath: str):
@@ -86,8 +94,8 @@ class Upsampler:
 
             # Calculate the number of bisections based on the maximum flow magnitude
             num_bisections = int(np.ceil(np.log(max([flow_mag_0_1_max, flow_mag_1_0_max]))/np.log(2)))
-            num_bisections = min(num_bisections, 4)
-            print(f"Number of bisections: {num_bisections}")
+            num_bisections = min(num_bisections, self.max_bisections)
+            # print(f"Number of bisections: {num_bisections}")
 
             if num_bisections == 0:
                 return [image[0]], [(t0 + t1) / 2]
@@ -99,22 +107,15 @@ class Upsampler:
 
         return images, timestamps
 
-    def _prepare_output_dir(self, src_dir: str, dest_dir: str):
-        # Copy directory structure.
-        def ignore_files(directory, files):
-            return [f for f in files if os.path.isfile(os.path.join(directory, f))]
-        shutil.copytree(src_dir, dest_dir, ignore=ignore_files)
-
     @staticmethod
     def _write_img(img: np.ndarray, idx: int, imgs_dir: str):
         assert os.path.isdir(imgs_dir)
         img = np.clip(img * 255, 0, 255).astype("uint8")
         path = os.path.join(imgs_dir, "%08d.jpg" % idx)
-        # img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         cv2.imwrite(path, img)
 
     @staticmethod
     def _write_timestamps(timestamps: list, timestamps_filename: str):
-        with open(timestamps_filename, 'w') as t_file:
-            t_file.writelines([str(t) + '\n' for t in timestamps])
+        np.savetxt(timestamps_filename, (np.array(timestamps)*1e9).astype(np.int64), fmt='%d', delimiter='\n')
